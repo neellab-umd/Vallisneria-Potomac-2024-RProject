@@ -1,0 +1,748 @@
+---
+title: "Potomac Study Area Map"
+author: "Maile Neel"
+date: today
+  
+format: 
+  html: 
+    title-block-banner: true
+    theme: sandstone
+  
+execute: 
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: load_packages
+#| warning: false
+#| include: false
+
+if (!require(pacman)) install.packages("pacman")
+pacman::p_load(tidyverse,
+               here,
+               magrittr,
+               ggthemes,
+               cowplot,
+               sf,
+               lemon,
+               gtable,
+               ggrepel,
+               lwgeom,
+               ggspatial,
+               magick,
+               update = FALSE)
+
+```
+
+Load MLG information and population genetic diversity inforomation
+
+```{r}
+## Population genetic diversity
+pop.gen.stats <- read_csv(here("processed.data",                               "final.site.level.popgen.stats.with.labels.csv"))
+
+## MLG data
+poppr.data <-readr::read_csv(here("processed.data", 
+                           "poppr.site.level.output.allpotomac.csv")) 
+```
+
+
+Load sampling location data needed for figures and join it with the diversity data.
+
+```{r}
+#| label: load_point_data
+ 
+popcentroids<-read_csv(here::here("data",
+                "PR.Pop.Centroids.UTMs.csv")) %>% 
+  dplyr::left_join(poppr.data, by = c("NewPop","OrderPop","Tide")) %>% 
+  dplyr::left_join(pop.gen.stats, by = c("NewPop","OrderPop","Tide"))
+
+```
+
+To convert to an sf object we specify the variables containing the coordinates. We also have to provide a CRS. I typically work with Universal Transverse Mercator (UTM) coordinates because they on on a grid that has equal-sized cells, and they are in units of meters.  However, because we need to plot a larger scale map of North America for context, I need to use Lat Long here. We are not measuring anything, so Lat Long will be o.k. for the figure. 
+
+I am specifying latitude longitude based on a the WGS84 datum.
+
+```{r}
+#| label: convert_point_data to sf
+
+popcentroids.sf.LatLong = sf::st_as_sf(popcentroids, 
+                                      coords = c("Longitude", "Latitude"), 
+                                      crs = "EPSG:4269")
+```
+
+Check out the sf object
+
+```{r}
+#| label: view_sf_object
+#| 
+popcentroids.sf.LatLong
+
+```
+
+Set the bounding boxes for the maps.  The local box is a bit larger than the minimum and maximum x and y extent of the sampling points. I got their bounding box using st_bbox(popcentroids.sf.LatLong) and then I kept changing the coordinates and checking what the plot looked like until I got the extent I wanted.
+
+The global bounding box was chosen to show the east coast including Canada to set the spatial context for the study area.
+
+```{r}
+#| label: set bounding boxes
+#-78.570465
+#-76.762046
+local.bbox.for.sf<- c(xmin = -78.590, ymin = 38.119906, xmax =  -76.789, ymax=40.29) 
+
+global.bbox.for.sf<- c(xmin=-87.83,ymin=24.677,xmax=-66.27,ymax=47.945)
+
+```
+
+In case it is needed in the future, a similar local bounding box using UTM coordinates in the EPSG:26918 CRS would be
+utm.bbox.for.sf<- c(xmin = 186806.5, ymin=4220502, xmax=350000.3, ymax=4450050) 
+
+Load in water shape file, which is the Chesapeake and Potomac file that was hand digitized to ensure the accuracy of the shoreline.  Filter for just the Potomac River.
+
+```{r}
+#| label: read_local_water_vector_data
+#| warning: false
+
+water<- sf::st_read("./shapefiles/CB.PR.Digitized.MN.2024.shp") %>% 
+sf::st_make_valid() %>% 
+dplyr::filter(Water=="Potomac") %>% 
+sf::st_transform(4269)
+```
+
+Crop the water polygon to the bounding box.
+
+```{r}
+#| label: crop_local_water_to_bounding_box
+water_crop <-water %>% 
+  dplyr::filter(Water=="Potomac") %>% 
+  sf::st_crop(local.bbox.for.sf)
+
+#plot(water_crop[1])
+```
+
+# Figure 1.
+
+Now read in a shapefile with political boundaries for Canada, the US, and Mexico that we will use for context. This shapefile comes from [The Commission for Environmental Cooperation (CEC)](http://www.cec.org/north-american-environmental-atlas/political-boundaries-2021/).  It is a bit cludgey to manually download the shapefile, but this is one of the best quality free sources I have found that includes all of North America. 
+
+I switch off spherical geometry and force sf to use planar geometry.  Not that I am a flat earther, but we are not calculating anything, so the planar geometry will not hurt and the spherical geometry throws errors.
+
+
+```{r}
+#| label: read_state_boundaries
+#| warning: false
+
+boundaries<- sf::st_read("./shapefiles/boundaries_p_2021_v3.shp") #%>% 
+#st_make_valid()
+
+sf::sf_use_s2(FALSE)
+```
+
+```{r}
+#| label: local_crop_state_boundaries
+#| warning: false
+boundaries_local_crop <-boundaries %>% 
+  dplyr::filter(STATEABB %in% c("US-WV","US-VA","US-MD","US-DC","US-OH")) %>% 
+  sf::st_transform(4269) %>% 
+  sf::st_crop(local.bbox.for.sf)
+
+```
+
+Get labels for states for the local map.
+
+```{r} 
+#| label: label_local_points
+
+#label_local_points <- sf::st_point_on_surface(local_boundaries_crop)
+
+#Get automatic points within each polygon and set the name to use as a label
+#label_local_coords <- as.data.frame(sf::st_coordinates(label_local_points))
+#label_local_coords$NAME <- label_local_points$NAME_En
+
+#Write out coordinates and finagle them until the labels look good.  Then read back in the modified locations.
+#write_csv(label_coords, "./shapefiles/label_coords.csv")
+
+label_local_coords<-readr::read_csv("./shapefiles/label_local_coords.csv")
+
+#plot(boundaries_local_crop[1])
+```
+
+```{r} 
+#| label: label_global_points
+
+label_global_coords<-read_csv("./shapefiles/context_label_coords.csv")
+
+```
+
+
+```{r}
+#| label: boundary_box_for_state_boundaries
+#| warning: false
+
+boundaries_global_crop <-boundaries %>% 
+  #filter(STATEABB %in% c("US-WV","US-VA","US-MD","US-DC","US-OH")) %>% 
+  sf::st_transform(4269) %>% 
+  sf::st_crop(global.bbox.for.sf) 
+
+
+#plot(boundaries_global_crop[1])
+```
+
+Create a boundary map at the country level
+
+```{r}
+#| label: global_crop_of_state_boundaries
+#| warning: false
+
+country_boundaries_global_crop <- boundaries_global_crop %>% 
+  dplyr::group_by(COUNTRY) %>% 
+       dplyr::summarise()
+
+```
+Create a function to set a palette for the point size range that is used by ggrepel to keep labels away from points when they have different sizes.
+
+```{r}
+my_pal <- function(range = c(1, 6)) {
+force(range)
+function(x) scales::rescale(x, to = range, from = c(0, 1))
+}
+```
+
+Create local map of sites in the study area with points labeled by their source (this paper versus Lloyd et al. 2011) and with size of the points indicating GD.
+
+```{r}
+#| label: fig-local_ggplot
+#| fig-cap: Potomac with vector map. 
+
+study.area <- ggplot() +
+  geom_sf(data = boundaries_local_crop, fill="white")+
+  geom_text(data = label_local_coords, aes(Longitude, Latitude, label = NAME), size=3)+
+  geom_sf(data = water_crop, fill = "lightgray", color = "lightgray") +
+  geom_sf(data = popcentroids.sf.LatLong,
+          aes(color = Tide, size = GD)) + 
+  continuous_scale(
+    aesthetics = c("size", "point.size"),
+    scale_name = "size",
+    palette = my_pal(c(1, 6)),
+    guide = "none"  # Hide the legend
+  ) +
+  geom_text_repel( #distinguish our sites with no box around the label
+    data = subset(popcentroids.sf.LatLong, Source == "This Paper"),
+    aes(label = OrderPop, geometry = geometry), 
+    stat = "sf_coordinates", 
+    min.segment.length = 0, 
+    point.padding = 0.2,
+    size = 2.5,
+    max.overlaps = 16
+  ) +
+  geom_label_repel(  #distinguish Lloyd et al. sites with a box around the label
+    data = subset(popcentroids.sf.LatLong, 
+                  Source == "Lloyd et al. 2011"),
+    aes(label = OrderPop, geometry = geometry),
+    stat = "sf_coordinates", 
+    min.segment.length = 0.0, 
+    point.padding = 0.2,
+    direction = "y",
+    size = 2.5,
+    max.overlaps = 16, 
+    label.padding = unit(0.05, "lines")
+  ) +
+  scale_x_continuous(expand = expansion(0)) +
+  scale_y_continuous(expand = expansion(0)) +
+  scale_color_grey(start = 0, end = .55) +
+  ggspatial::annotation_scale(
+    location = "br",
+    width_hint = 0.3,
+    height = unit(0.11, "cm"),
+    pad_x = unit(0.35, "in"),
+    pad_y = unit(0.06, "in"),
+    text_cex = 0.5,
+    text_pad = unit(0.02, "cm")
+  ) +
+  ggspatial::annotation_north_arrow(
+    location = "br",
+    which_north = "true",
+    pad_x = unit(0.76, "in"),
+    pad_y = unit(0.13, "in"),
+    height = unit(.5, "cm"),
+    width = unit(.6, "cm"),
+    style = north_arrow_fancy_orienteering
+  ) +
+  guides(
+    color = guide_legend(title = NULL),  # Title for the color legend
+    size = guide_legend(title = expression(paste(italic("GD"))))    # Title for the size legend
+  ) +
+  theme_map() +
+  theme(
+    legend.title = element_text(size = 7, 
+                                margin = margin(b = 0),
+                                hjust = 0.5),
+    legend.position = "inside", 
+    legend.position.inside = c(0.15, 0.65),
+    legend.text = element_text(size = 6.5),
+    legend.spacing.x = unit(.05, "cm"),
+    legend.spacing.y = unit(.2, "cm"),
+    legend.key.width = unit(.01, "cm"),
+    legend.key.height = unit(.29, "cm"),
+    panel.border = element_rect(fill = NA, colour = "black", linewidth = 1),
+    axis.text = element_blank()
+  )
+```
+
+Add a photo into the study area map.
+
+```{r}
+study.area.photo <- study.area +
+  draw_image(
+  "./data/Vallphotos2.png",
+  x = -78.573, y = 37.96, width = 1.1, height = 1.1
+  )
+
+#xmin = -78.588, ymin = 38.119906, xmax =  -76.789, ymax=40.29) 
+```
+
+Context Map
+
+```{r}
+#| label: fig-global_ggplot
+#| fig-cap: inset with vector map. 
+#| warning: false
+
+context <- ggplot() +
+  geom_sf(data = boundaries_global_crop,
+    fill = "white",
+    color = "gray")+
+  geom_sf(data = country_boundaries_global_crop, fill = NA, color="black") +
+  geom_text(data = filter(label_global_coords,Category=="Ocean"), 
+            aes(Longitude, Latitude,label = stringr::str_wrap(NAME, 5)), 
+            size=2, fontface='italic', lineheight = .8)+
+  geom_text(data = filter(label_global_coords,Category=="Country"), 
+            aes(Longitude, Latitude, label = stringr::str_wrap(NAME, 5)), 
+            size=2,lineheight = .8)+
+  #geom_text(data =filter(label_global_coords,Category=="Province"), 
+  #          aes(Longitude, Latitude, label = stringr::str_wrap(NAME, 5)), 
+  #          size=1.1,lineheight = .8)+
+  geom_sf(data = popcentroids.sf.LatLong,
+          aes(color = Tide), size=.05, show.legend = FALSE)+ 
+  scale_x_continuous(expand = expansion(0)) +
+  scale_y_continuous(expand = expansion(0)) +
+  scale_color_grey(start = 0, end = .55) +
+  geom_rect(aes(
+    xmin = -78.570465, 
+    ymin = 38.109906, 
+    xmax =  -76.762046, 
+    ymax= 40.187438),
+    fill = NA,
+    colour = "black",
+    linewidth = 0.3,
+    show.legend=FALSE)+
+  ggspatial::annotation_scale(
+    location = "br",
+    width_hint = 0.3,
+    height = unit(0.1, "cm"),
+    pad_x = unit(0.05, "in"),
+    pad_y = unit(0.06, "in"),
+    text_cex = 0.,
+    text_pad = unit(0.05, "cm")
+  ) +
+  theme_map() +
+  theme(axis.text = element_blank(),
+        panel.background = element_rect(fill = "lightgray"),
+        panel.border = element_rect(colour = "black", linewidth = 1,fill=NA)
+  )
+
+```
+
+Combine the study area map and the inset context map using cowplot.
+
+```{r}
+#| label: fig-combined_ggplot
+#| fig-cap: study area with global map inset.
+
+cowplot::ggdraw() +
+  draw_plot(study.area.photo) +
+  draw_plot(context,
+    height = 0.29,
+    x = 0.317,
+    y = 0.7
+  )
+
+ggsave(here("figures","Figure1.png"),width = 15, height = 15, units = "cm", dpi=350)
+
+```
+
+#Figure 3.
+
+Figure 3 is a set of maps of the distribution of each extensive multi-site MLG across non-tidal sites.
+
+Read in maximum distance information for each multi-site MLG, filter to include only the MLGs with distances >10 km to get just the MLGs in the figure. Create a vector that will be used to label each facet.
+
+```{r}
+#| label: read-in-mlg-distances
+
+mlg.distances <- read_csv(here("processed.data",
+                                 "multi.site.mlg.distances.csv")) %>% 
+filter(max>10) %>% 
+mutate(MLG.names = paste0("MLG ", ToMLG),
+      label = paste0(round(max,0)," km")) %>%
+dplyr::select(MLG.names, max, label)
+
+
+```
+
+Read in frequency data for MLGs and pivot the data so all the MLG names are in one column and the associated data are in matching column so that we can facet on MLG name.
+
+```{r}
+#| label: wrangle_mlg_frequencies
+
+MLG_freqs <- read_csv(here::here("processed.data",
+                                 "mlg.count.and.freq.by.pop.csv")) %>% 
+  dplyr::left_join(popcentroids, by = "NewPop") %>% 
+  tidyr::pivot_longer(cols=FR_199:FR_358, 
+                      names_to = "MLG.names", values_to = "Freqs", ) %>% 
+  dplyr::mutate(MLG.names = stringr::str_replace(MLG.names,"FR_", "MLG ")) %>% 
+  dplyr::left_join(mlg.distances, by  = "MLG.names") %>% 
+  dplyr:: mutate(MLG.names = fct_reorder(MLG.names, -max))
+  
+
+```
+
+Convert to spatial object.
+
+```{r}
+#| label: convert_ mlg_frequencies_to_sf
+
+MLG_freqs.sf.LatLong <- sf::st_as_sf(MLG_freqs, 
+                                      coords = c("Longitude", "Latitude"), 
+                                      crs = "EPSG:4269")
+
+```
+
+Generate the bounding box - I ended up not cropping the input shapefile with this but rather controlled the extent withing ggplot using coord_sf()
+
+```{r}
+#| label: mlg-bounding-box
+MLG_Freq.bounding.box <- c(xmin = -78.5, ymin = 38.985224, xmax = -77.189, ymax = 39.73)
+
+```
+
+Use this function to put the legend in one of the unused spaces in the facet wrap. I got the function from an answer to a stackoverflow question (https://stackoverflow.com/questions/54438495/shift-legend-into-empty-facets-of-a-faceted-plot-in-ggplot2). The author of the function was RLave.
+
+```{r}
+#| label: shift-legend-function
+
+shift_legend2 <- function(p) {
+  # ...
+  # to grob
+  gp <- ggplotGrob(p) 
+  facet.panels <- grep("^panel", gp[["layout"]][["name"]])
+  empty.facet.panels <- sapply(facet.panels, function(i) "zeroGrob" %in% class(gp[["grobs"]][[i]]))
+  empty.facet.panels <- facet.panels[empty.facet.panels]
+
+  # establish name of empty panels
+  empty.facet.panels <- gp[["layout"]][empty.facet.panels, ]
+  names <- empty.facet.panels$name
+  # example of names:
+  #[1] "panel-3-2" "panel-3-3"
+
+# now we just need a simple call to reposition the legend
+  reposition_legend(p, 'center', panel=names)
+}
+
+```
+
+
+Generate facet-wrapped plots of all frequencies of all multi-site MLGs with scale bar in only one facet.
+
+```{r}
+#| label: fig-mlg_freq
+#| fig-cap: Frequency of multisite MLGs in the non-tidal Potomac River. 
+
+MLG.Plot <- ggplot() +
+  geom_sf(data = water_crop, fill = "gray", color = "gray") +
+  geom_sf(data=popcentroids.sf.LatLong, shape= 1, size=1, stroke = .3, fill=NA, color = "grey30") +
+  geom_sf(data = filter(MLG_freqs.sf.LatLong, Freqs>0),
+          aes(size = Freqs)) +
+  geom_text(data = MLG_freqs.sf.LatLong,
+            aes(label = MLG.names), 
+            x = -78.3, y = 39.55, 
+            hjust = 0, 
+            size=2.5) +
+  geom_text(data = MLG_freqs.sf.LatLong,
+            aes(label = label),
+            x = -78.3, y = 39.5, 
+            hjust = 0, 
+            size=2.5) +
+  facet_wrap(.~MLG.names,
+              ncol = 2) +
+  coord_sf(xlim = c(-78.58, -77.189), ylim = c(38.985224, 39.73), expand = FALSE) + 
+    ggspatial::annotation_scale(
+    location = "bl",
+    width_hint = 0.4,
+    height = unit(0.1, "cm"),
+    pad_x = unit(0.35, "in"),
+    pad_y = unit(0.06, "in"),
+    text_cex = 0.5,
+    text_pad = unit(0.05, "cm"), 
+    data = subset(MLG_freqs.sf.LatLong, MLG.names == "MLG 346")) +
+ scale_size_area(max_size = 5, breaks = c(.1, .25, .5, .75, 1))+
+  scale_x_continuous(expand = expansion(0)) +
+  scale_y_continuous(expand = expansion(0)) +
+  scale_color_grey(start =0, end = .55) +
+  theme_map() +
+  labs(size = "Frequency")+
+  theme(
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 6),
+    legend.spacing.x = unit(.05, "cm"),
+    legend.key.width = unit(.01, "cm"),
+    legend.key.height = unit(.29, "cm"),
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    panel.spacing.x = unit(.15, "lines"),
+    axis.text = element_blank())
+
+```
+
+Shift the legend
+
+```{r}
+#| label: fig-mlg_freq_better_legend
+#| fig-cap: Frequency of multisite MLGs in the non-tidal Potomac River with better legend. 
+
+MLG.Plot.better.legend <- shift_legend2(MLG.Plot)
+
+```
+
+Save the final plot out.
+
+```{r}
+#| label: save_figure_3
+
+ggsave(here("figures","Figure3.png"), plot = MLG.Plot.better.legend,
+       width = 15, height = 25, units = "cm", dpi=350)
+```
+
+# Figure 5
+
+Figure 5 is a grid of maps of the value of each genetic diversity statistic at each site, combined with a violin plot showing the mean value and distribution for each tidal environment. 
+
+Create a function that creates the maps of genetic diversity metrics at each site.
+
+```{r}
+#| label: function_for_figure_5_maps
+
+map_plots <- function(sf.data, metric, ylabel) {
+  map.plot <- ggplot() +
+    geom_sf(data = water_crop, fill = "gray79", color = "gray79") +
+    geom_sf(data = sf.data,
+            aes(size = !!sym(metric), color = Tide)) +
+      coord_sf(xlim = c(-78.58, -76.95), ylim = c(38.312, 39.73), expand = FALSE) + 
+    scale_x_continuous(expand = expansion(0)) +
+    scale_y_continuous(expand = expansion(0)) +
+    scale_color_grey(start =0, end = .60, guide = "none") +
+    ggthemes::theme_map() +
+    labs(size = ylabel)+
+    theme(
+      legend.title = element_text(size = 8, hjust = 0.5),
+      legend.text = element_text(size = 7, margin = margin(0, 0, 0, 0)),
+      legend.spacing.x = unit(.02, "cm"),
+      legend.key.width = unit(.01, "cm"),
+      legend.key.height = unit(.29, "cm"),
+      strip.background = element_blank(),
+      strip.text = element_blank(),
+      panel.spacing.x = unit(.15, "lines"),
+      axis.text = element_blank(),
+      legend.position = "inside",
+      legend.position.inside = c(0.8,0.9),
+      legend.justification = c("center", "top")) 
+
+return(map.plot)
+}
+```
+
+Apply the map_plots() function to each genetic diversity variable and assign the map_plots to a named list. I do this manually for each one to control inclusion of a legend with the desired breaks in each map and to include a legend for tide and a scale bar on only one of the plots. I didn't see how to use purrr::map to automate this easily.
+
+```{r}
+#| label: create_figure_5_maps
+
+maps_genetic_diversity <- list(
+  "PercPolymorphic" = map_plots(popcentroids.sf.LatLong,"PercPolymorphic", 
+                                expression(paste(italic("P")))) + 
+        scale_radius(breaks = c(0.5,0.65,0.75,0.85,1)),
+  "Ap" = map_plots(popcentroids.sf.LatLong, "Ap",
+                   expression(paste(italic("A")))),
+  "Ar" = map_plots(popcentroids.sf.LatLong, "Ar",
+                   expression(paste(italic(A[r])))) ,
+  "Ho" = map_plots(popcentroids.sf.LatLong, "Ho", 
+                   expression(paste(italic(H[O])))),
+  "He" = map_plots(popcentroids.sf.LatLong, "He", 
+                   expression(paste(italic(H[E])))) + 
+        scale_size_continuous(breaks = c(0.25,0.35,0.45,0.5)),
+  "Fis" = map_plots(popcentroids.sf.LatLong, "Fis", 
+                    expression(paste(italic(F[IS])))) + 
+        scale_radius(range = c(1,6), breaks = c(-.75, -.25, 0, 0.1, 0.2)),
+  "FST_within" = map_plots(popcentroids.sf.LatLong, "FST.within",
+                           expression(italic(paste(F[ST]))))+ 
+        scale_radius(breaks = c(0.01,0.05,0.1,0.15)),
+  "Gst_Hed_within" = map_plots(popcentroids.sf.LatLong, "Gst.Hed.within",
+                               expression(paste(italic("G\u2032\u2032"[ST]))))+
+        scale_radius(breaks = c(0.01,0.05,0.1,0.2)),
+  "Josts_D_within" = map_plots(popcentroids.sf.LatLong, "Josts.D.within",
+                               expression(paste(italic(D[est])))) +
+        scale_radius(breaks = c(0.01,0.05,0.1,0.2)) +
+    ggspatial::annotation_scale(
+      location = "bl",
+      width_hint = 0.4,
+      height = unit(0.15, "cm"),
+      pad_x = unit(0.3, "in"),
+      pad_y = unit(0.2, "in"),
+      text_cex = 0.5,
+      text_pad = unit(0.05, "cm")
+    )
+)
+
+```
+
+## Function for creating violin plots
+
+This function creates the violin plots needed to summarize each of the population diversity statistics by tidal regime.
+
+```{r}
+violins.galore <- function(yval, ylab) {
+  ggplot(pop.gen.stats, aes(x = Tide, y = !!sym(yval))) +
+    labs(x ="Tidal Regime", y = ylab) +
+    scale_x_discrete(limits=c("NonTidal", "Tidal"),
+                     labels = c("Nonidal", "Tidal")) +
+    geom_violin(aes(color = Tide))+
+    stat_summary(fun = mean,
+                 fun.min = function(x) mean(x) - sd(x), 
+                 fun.max = function(x) mean(x) + sd(x),
+                 na.rm = TRUE,
+                 position = position_dodge(.895),
+                 shape = 18, 
+                 size = .8,
+                 show.legend = FALSE,
+                 geom = "pointrange",
+                 aes(color = Tide))+
+    scale_colour_grey(start =0, end = .60)+
+    theme_classic()+
+    theme(axis.title = element_text(size=9),
+          axis.text  = element_text(size=9),
+          legend.position = "none")
+}
+
+```
+
+## Create list of violin plots
+
+```{r}
+violin.list <-list(
+         violins.galore("PercPolymorphic",expression(paste(italic("P")))),
+         violins.galore("Ap",expression(paste(italic("A")))),
+         violins.galore("Ar",expression(paste(italic(A[r])))),
+         violins.galore("Ho",expression(paste(italic(H[O])))),
+         violins.galore("He",expression(paste(italic(H[E])))),
+         violins.galore("Fis",expression(paste(italic(F[IS])))),
+         violins.galore("FST.within",expression(paste(italic(F[ST])))),
+         violins.galore("Gst.Hed.within",
+                        expression(paste(italic("G\u2032\u2032"[ST])))),
+         violins.galore("Josts.D.within",expression(paste(D[est])))
+         )
+```
+
+
+Create function to combine the maps and violin plots.
+
+```{r}
+#| label: function-for-fig-maps_and-violins
+#| fig-cap: genetic diversity by site and tide.
+
+combine_maps_and_violins <- function(gen.map, gen.violin) {
+  cowplot::ggdraw() +
+    cowplot::draw_plot(gen.map) +
+    cowplot::draw_plot(gen.violin,
+      height = 0.42,
+  width = .45,
+      x = 0.08,
+      y = 0.29
+    )
+}
+
+```
+
+
+
+```{r}
+
+wtf <- map2(maps_genetic_diversity, violin.list, combine_maps_and_violins)
+
+purrr::iwalk(wtf, ~{
+     ggsave(paste0("./figures/viomap_", .y,
+                               ".png"), 
+                        .x, 
+                       width=10, 
+                       height=10, 
+                       units="cm", 
+                       dpi = 350,
+                       bg = "white")
+    }
+  )
+
+viomap1 <-combine_maps_and_violins(maps_genetic_diversity[[1]], violin.list[[1]])
+viomap2 <-combine_maps_and_violins(maps_genetic_diversity[[2]], violin.list[[2]])
+viomap3 <-combine_maps_and_violins(maps_genetic_diversity[[3]], violin.list[[3]])
+viomap4 <-combine_maps_and_violins(maps_genetic_diversity[[4]], violin.list[[4]])
+viomap5 <-combine_maps_and_violins(maps_genetic_diversity[[5]], violin.list[[5]])
+viomap6 <-combine_maps_and_violins(maps_genetic_diversity[[6]], violin.list[[6]])
+viomap7 <-combine_maps_and_violins(maps_genetic_diversity[[7]], violin.list[[7]])
+viomap8 <-combine_maps_and_violins(maps_genetic_diversity[[8]], violin.list[[8]])
+viomap9 <-combine_maps_and_violins(maps_genetic_diversity[[9]], violin.list[[9]])
+
+
+ggsave( here("figures","viomap1.png"), plot = viomap1, width = 10, height = 10, units = "cm", dpi=350, bg = "white")
+ggsave( here("figures","viomap2.png"), plot = viomap2, width = 10, height = 10, units = "cm", dpi=350, bg = "white")
+ggsave( here("figures","viomap3.png"), plot = viomap3, width = 10, height = 10, units = "cm", dpi=350, bg = "white")
+ggsave( here("figures","viomap4.png"), plot = viomap4, width = 10, height = 10, units = "cm", dpi=350, bg = "white")
+ggsave( here("figures","viomap5.png"), plot = viomap5, width = 10, height = 10, units = "cm", dpi=350, bg = "white")
+ggsave( here("figures","viomap6.png"), plot = viomap6, width = 10, height = 10, units = "cm", dpi=350, bg = "white")
+ggsave( here("figures","viomap7.png"), plot = viomap7, width = 10, height = 10, units = "cm", dpi=350, bg = "white")
+ggsave( here("figures","viomap8.png"), plot = viomap8, width = 10, height = 10, units = "cm", dpi=350, bg = "white")
+ggsave( here("figures","viomap9.png"), plot = viomap9, width = 10, height = 10, units = "cm", dpi=350, bg = "white")
+
+
+```
+
+```{r}
+
+# Create a vector of image filenames based on the motif "viomap"
+
+filenames <- list.files(path = "./figures", pattern = "viomap", full.names = TRUE)
+
+# Read images with names in that vector
+images_list <- map(filenames, ~{
+  if (file.exists(.x)) {
+    image_read(.x)
+  } else {
+    message("File not found: ", .x)
+    NULL
+  }
+})
+
+## #liminate empty or non-conforming images
+images_list <- compact(images_list)
+
+## Combine images at their full size
+final_image <- image_montage(image_join(images_list), tile = "3x3", geometry = "1000x1000+0+0")
+
+## Save combined image
+image_write(final_image, path = here("figures", "Combo.Pop.Gen.Plots.png"), format = "png", density = "350x350")
+
+
+```
+
+```{r}
+## Delete all the individual map/violin figures.
+
+file.remove(filenames)
+
+```
